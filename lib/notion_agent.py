@@ -1,5 +1,6 @@
 import os
 import random
+import sqlite3
 import getpass
 import warnings
 from pathlib import Path
@@ -16,7 +17,7 @@ warnings.filterwarnings(
 )
 
 from langchain_google_genai import ChatGoogleGenerativeAI  # noqa: E402
-from langgraph.checkpoint.memory import MemorySaver  # noqa: E402
+from langgraph.checkpoint.sqlite import SqliteSaver  # noqa: E402
 from langgraph.graph import END, START, MessagesState, StateGraph  # noqa: E402
 from langgraph.prebuilt import ToolNode  # noqa: E402
 
@@ -80,6 +81,15 @@ def _route_after_chat(state: MessagesState) -> Literal["tools", "__end__"]:
     return END
 
 
+CHECKPOINT_DB_PATH = Path(__file__).parent / "db" / "agent.sqlite"
+
+
+def _open_checkpointer() -> SqliteSaver:
+    CHECKPOINT_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(str(CHECKPOINT_DB_PATH), check_same_thread=False)
+    return SqliteSaver(conn)
+
+
 def _build_graph():
     builder = StateGraph(MessagesState)
 
@@ -99,7 +109,7 @@ def _build_graph():
 
     builder.add_edge("tools", "chat")
 
-    return builder.compile(checkpointer=MemorySaver())
+    return builder.compile(checkpointer=_open_checkpointer())
 
 
 graph = _build_graph()
@@ -174,7 +184,7 @@ def _repl() -> None:
     if saved is not None:
         print(f"Graph image saved to {saved}\n")
 
-    session = 0
+    session = 1
     thread_id = f"session-{session}"
 
     while True:
