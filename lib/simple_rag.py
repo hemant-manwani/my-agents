@@ -17,6 +17,8 @@ Usage:
 
 import math
 import os
+import sqlite3
+import uuid
 from typing import Annotated, TypedDict
 
 from dotenv import load_dotenv
@@ -26,6 +28,7 @@ load_dotenv()
 from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langchain_groq import ChatGroq
 from langchain_nvidia_ai_endpoints import NVIDIAEmbeddings
+from langgraph.checkpoint.sqlite import SqliteSaver
 from langgraph.graph import END, START, StateGraph
 from langgraph.graph.message import add_messages
 
@@ -145,6 +148,7 @@ def build_rag_graph(
     groq_api_key: str,
     nvidia_api_key: str,
     store: VectorStore,
+    db_path: str = "sessions.db",
     top_k: int = 3,
 ):
     embedder = NVIDIAEmbeddings(
@@ -188,7 +192,8 @@ def build_rag_graph(
     graph.add_edge("retrieve", "generate")
     graph.add_edge("generate", END)
 
-    return graph.compile()
+    conn = sqlite3.connect(db_path, check_same_thread=False)
+    return graph.compile(checkpointer=SqliteSaver(conn))
 
 
 # ---------------------------------------------------------------------------
@@ -215,11 +220,15 @@ def main() -> None:
     store.add(DOCUMENTS, vecs)
     print("Done.\n")
 
-    # Compile the LangGraph RAG
-    rag = build_rag_graph(groq_api_key=groq_api_key, nvidia_api_key=nvidia_api_key, store=store)
+    # Compile the LangGraph RAG (sessions persisted to SQLite)
+    db_path = "sessions.db"
+    rag = build_rag_graph(groq_api_key=groq_api_key, nvidia_api_key=nvidia_api_key, store=store, db_path=db_path)
+    print(f"Sessions persisted to: {db_path}")
 
-    print("Real Estate Agent ready. Type 'quit' or 'exit' to end the conversation.\n")
-    messages: list[BaseMessage] = []
+    session_id = str(uuid.uuid4())
+    config = {"configurable": {"thread_id": session_id}}
+    print(f"Session started  [id: {session_id}]")
+    print("Real Estate Agent ready. Type 'quit' or 'exit' to end.\n")
 
     while True:
         question = input("You: ").strip()
@@ -229,12 +238,12 @@ def main() -> None:
             print("Agent: Thanks for chatting! Have a great day.")
             break
 
-        messages.append(HumanMessage(content=question))
-
-        result = rag.invoke({"messages": messages, "context": []})
+        result = rag.invoke(
+            {"messages": [HumanMessage(content=question)], "context": []},
+            config=config,
+        )
 
         ai_message: AIMessage = result["messages"][-1]
-        messages.append(ai_message)
         print(f"Agent: {ai_message.content}\n")
 
 
