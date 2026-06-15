@@ -17,15 +17,17 @@ Usage:
 
 import math
 import os
-from typing import TypedDict
+from typing import Annotated, TypedDict
 
 from dotenv import load_dotenv
 
 load_dotenv()
 
+from langchain_core.messages import AIMessage, BaseMessage, HumanMessage, SystemMessage
 from langchain_groq import ChatGroq
 from langchain_nvidia_ai_endpoints import NVIDIAEmbeddings
 from langgraph.graph import END, START, StateGraph
+from langgraph.graph.message import add_messages
 
 # ---------------------------------------------------------------------------
 # Sample knowledge base — real estate sales
@@ -131,9 +133,8 @@ class VectorStore:
 # ---------------------------------------------------------------------------
 
 class RAGState(TypedDict):
-    question: str
+    messages: Annotated[list[BaseMessage], add_messages]  # auto-appends on update
     context: list[str]
-    answer: str
 
 
 # ---------------------------------------------------------------------------
@@ -158,22 +159,26 @@ def build_rag_graph(
 
     # --- node: retrieve -------------------------------------------------------
     def retrieve(state: RAGState) -> dict:
-        query_vec = embedder.embed_query(state["question"])
+        # embed the latest human message to find relevant chunks
+        last_human: HumanMessage = next(
+            m for m in reversed(state["messages"]) if isinstance(m, HumanMessage)
+        )
+        query_vec = embedder.embed_query(last_human.content)
         chunks = store.search(query_vec, top_k=top_k)
         return {"context": chunks}
 
     # --- node: generate -------------------------------------------------------
     def generate(state: RAGState) -> dict:
         context_text = "\n\n".join(f"- {c}" for c in state["context"])
-        prompt = (
-            "You are a helpful assistant. Use only the context below to answer "
-            "the question. If the answer is not in the context, say so.\n\n"
-            f"Context:\n{context_text}\n\n"
-            f"Question: {state['question']}\n\n"
-            "Answer:"
-        )
-        answer = llm.invoke(prompt)
-        return {"answer": answer.content}
+        system = SystemMessage(content=(
+            "You are a knowledgeable real estate sales agent. "
+            "Use only the context below to answer the customer's questions. "
+            "If the answer is not in the context, say so politely.\n\n"
+            f"Context:\n{context_text}"
+        ))
+        # pass system message + full conversation history directly to the LLM
+        response: AIMessage = llm.invoke([system] + state["messages"])
+        return {"messages": [response]}
 
     # --- wire the graph -------------------------------------------------------
     graph = StateGraph(RAGState)
@@ -213,17 +218,24 @@ def main() -> None:
     # Compile the LangGraph RAG
     rag = build_rag_graph(groq_api_key=groq_api_key, nvidia_api_key=nvidia_api_key, store=store)
 
-    questions = [
-        "Do you have any waterfront properties available?",
-        "What loan options are there for buyers with limited down payment savings?",
-        "How should I price my home to sell quickly?",
-        "Are there any pet-friendly condos in Denver?",
-    ]
+    print("Real Estate Agent ready. Type 'quit' or 'exit' to end the conversation.\n")
+    messages: list[BaseMessage] = []
 
-    for q in questions:
-        print(f"Q: {q}")
-        result = rag.invoke({"question": q, "context": [], "answer": ""})
-        print(f"A: {result['answer']}\n{'-' * 60}\n")
+    while True:
+        question = input("You: ").strip()
+        if not question:
+            continue
+        if question.lower() in {"quit", "exit"}:
+            print("Agent: Thanks for chatting! Have a great day.")
+            break
+
+        messages.append(HumanMessage(content=question))
+
+        result = rag.invoke({"messages": messages, "context": []})
+
+        ai_message: AIMessage = result["messages"][-1]
+        messages.append(ai_message)
+        print(f"Agent: {ai_message.content}\n")
 
 
 if __name__ == "__main__":
