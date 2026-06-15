@@ -5,6 +5,7 @@ import getpass
 import warnings
 from pathlib import Path
 from typing import Literal
+from uuid import uuid4
 
 from dotenv import load_dotenv
 from langchain_core.messages import AIMessageChunk, HumanMessage, SystemMessage
@@ -18,8 +19,10 @@ warnings.filterwarnings(
 
 from langchain_google_genai import ChatGoogleGenerativeAI  # noqa: E402
 from langgraph.checkpoint.sqlite import SqliteSaver  # noqa: E402
+from langgraph.config import get_store  # noqa: E402
 from langgraph.graph import END, START, MessagesState, StateGraph  # noqa: E402
 from langgraph.prebuilt import ToolNode  # noqa: E402
+from langgraph.store.sqlite import SqliteStore  # noqa: E402
 
 load_dotenv()
 
@@ -33,12 +36,20 @@ def _ensure_env(var: str) -> None:
 _ensure_env("GOOGLE_API_KEY")
 
 
+USER_ID = "hemant"
+MEMORY_NAMESPACE = ("memories", USER_ID)
+
+
 SYSTEM_PROMPT = (
-    "You are a helpful assistant. "
+    "You are a helpful assistant with long-term memory about the user. "
     "When the user asks a yes-or-no (binary) question, call the "
     "`yes_or_no_oracle` tool exactly once and use its result ('yes' or "
     "'no') to phrase a confident, single-sentence reply. "
-    "For any other kind of question, answer normally without using the tool."
+    "Whenever the user shares a preference, identifying detail, or "
+    "anything you should remember in future conversations, call the "
+    "`remember` tool with a concise statement of the fact (do not call "
+    "it for one-off requests or transient questions). "
+    "For everything else, answer normally without using any tool."
 )
 
 
@@ -53,7 +64,22 @@ def yes_or_no_oracle() -> str:
     return "no" if random.random() < 0.5 else "yes"
 
 
-TOOLS = [yes_or_no_oracle]
+@tool
+def remember(fact: str) -> str:
+    """Save a single concise fact about the user to long-term memory.
+
+    Use this whenever the user shares a preference, identifying detail,
+    work context, or anything else worth remembering across future
+    conversations. Pass a self-contained statement (e.g. "User prefers
+    concise answers", "User's name is Hemant"). Do not store transient
+    or one-off requests.
+    """
+    store = get_store()
+    store.put(MEMORY_NAMESPACE, key=str(uuid4()), value={"content": fact})
+    return f"Remembered: {fact}"
+
+
+TOOLS = [yes_or_no_oracle, remember]
 
 llm = ChatGoogleGenerativeAI(
     model="gemini-2.5-flash",
@@ -62,8 +88,18 @@ llm = ChatGoogleGenerativeAI(
 llm_with_tools = llm.bind_tools(TOOLS)
 
 
+def _load_memory_block() -> str:
+    store = get_store()
+    items = list(store.search(MEMORY_NAMESPACE))
+    if not items:
+        return ""
+    bullets = "\n".join(f"- {item.value['content']}" for item in items)
+    return f"\n\nKnown facts about the user:\n{bullets}"
+
+
 def _chat_node(state: MessagesState) -> dict:
-    messages = [SystemMessage(content=SYSTEM_PROMPT), *state["messages"]]
+    system = SYSTEM_PROMPT + _load_memory_block()
+    messages = [SystemMessage(content=system), *state["messages"]]
     response = llm_with_tools.invoke(messages)
     return {"messages": [response]}
 
@@ -82,12 +118,25 @@ def _route_after_chat(state: MessagesState) -> Literal["tools", "__end__"]:
 
 
 CHECKPOINT_DB_PATH = Path(__file__).parent / "db" / "agent.sqlite"
+STORE_DB_PATH = Path(__file__).parent / "db" / "memories.sqlite"
 
 
 def _open_checkpointer() -> SqliteSaver:
     CHECKPOINT_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
     conn = sqlite3.connect(str(CHECKPOINT_DB_PATH), check_same_thread=False)
     return SqliteSaver(conn)
+
+
+def _open_store() -> SqliteStore:
+    STORE_DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(
+        str(STORE_DB_PATH),
+        check_same_thread=False,
+        isolation_level=None,
+    )
+    store = SqliteStore(conn)
+    store.setup()
+    return store
 
 
 def _build_graph():
@@ -109,7 +158,10 @@ def _build_graph():
 
     builder.add_edge("tools", "chat")
 
-    return builder.compile(checkpointer=_open_checkpointer())
+    return builder.compile(
+        checkpointer=_open_checkpointer(),
+        store=_open_store(),
+    )
 
 
 graph = _build_graph()
