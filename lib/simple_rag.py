@@ -244,8 +244,8 @@ def main() -> None:
     rag = build_rag_graph(groq_api_key=groq_api_key, nvidia_api_key=nvidia_api_key, store=store, db_path=db_path)
     print(f"Sessions persisted to: {db_path}")
 
-    # session_id = str(uuid.uuid4())
-    session_id = "4a01ed2b-1452-4259-87e9-90d9a55ca287"
+    session_id = str(uuid.uuid4())
+    # session_id = "4a01ed2b-1452-4259-87e9-90d9a55ca287"
     config = {"configurable": {"thread_id": session_id}}
     print(f"Session started  [id: {session_id}]")
     print("Real Estate Agent ready. Type 'quit' or 'exit' to end.\n")
