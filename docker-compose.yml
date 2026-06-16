@@ -1,0 +1,24 @@
+services:
+  weaviate:
+    image: cr.weaviate.io/semitechnologies/weaviate:1.29.0
+    ports:
+      - "8082:8080"   # REST API
+      - "50051:50051" # gRPC
+    volumes:
+      - weaviate_data:/var/lib/weaviate
+    environment:
+      # No auth for local dev
+      AUTHENTICATION_ANONYMOUS_ACCESS_ENABLED: "true"
+
+      # We bring our own vectors (NVIDIA), so no built-in vectorizer
+      DEFAULT_VECTORIZER_MODULE: "none"
+
+      # Enable BM25 + hybrid search (built-in, no extra module needed)
+      ENABLE_MODULES: ""
+
+      PERSISTENCE_DATA_PATH: "/var/lib/weaviate"
+      QUERY_DEFAULTS_LIMIT: 25
+      CLUSTER_HOSTNAME: "node1"
+
+volumes:
+  weaviate_data:
